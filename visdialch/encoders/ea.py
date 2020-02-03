@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
+from visdialch.utils import DynamicRNN
 
 class UtilityBlock(nn.Module):
     """Efficient attention mechanism for many utilities block implemented for the visual dialog task (here: three utilities).
@@ -151,28 +152,28 @@ class UtilityEncoder(nn.Module):
        
         self.util1 = UtilityLayer(hidden_dim=config["lstm_hidden_size"], feedforward_dim=2048, nhead=8, dropout=0.1)
         self.util2 = UtilityLayer(hidden_dim=config["lstm_hidden_size"], feedforward_dim=2048, nhead=8, dropout=0.1)
-        self.summary_attn = SummaryAttn(hidden_dim=config["lstm_hidden_size"], num_attn=3, config=["dropout"]) 
-        self.context_fusion = nn.Linear(hidden_dim=config["lstm_hidden_size"], 
+        self.summary_attn = SummaryAttn(dim=config["lstm_hidden_size"], num_attn=3, dropout=config["model_dropout"]) 
+        self.context_fusion = nn.Linear(2*config["lstm_hidden_size"], config["lstm_hidden_size"])
 
         self.v_proj = nn.Linear(
                 config["img_feature_size"],
                 config["lstm_hidden_size"]
-            )
+                )
 
-        self.j_proj = n.Linear(
+        self.j_proj = nn.Linear(
+                config["lstm_hidden_size"],
+                config["lstm_hidden_size"]
+                )
+
+        self.q_proj = nn.Linear(
                 config["lstm_hidden_size"]*2,
                 config["lstm_hidden_size"]
-            )
+                )
 
-        self.q_proj = n.Linear(
+        self.h_proj = nn.Linear(
                 config["lstm_hidden_size"]*2,
                 config["lstm_hidden_size"]
-            )
-
-        self.h_proj = n.Linear(
-                config["lstm_hidden_size"]*2,
-                config["lstm_hidden_size"]
-            )
+                )
 
     def lang_emb(self, seq, seq_len, lang_type='Ques'):
         rnn_cls = self.hist_rnn if lang_type =='Hist' else self.ques_rnn if lang_type == 'Ques' else None
@@ -206,13 +207,13 @@ class UtilityEncoder(nn.Module):
         n_batch, n_round, _ = q.size()
         enc_outs = []
         structures = []
+        q_feat = None
         hs = None
-
+        
         for i in range(n_round):
             hs = self.add_entry(hs, h[:, i, :], hl[:, i])
-        
-        q_feat = self.lang_emb(q[:, i, :], ql[:, i]) # how to deal with question features?
-        
+            q_feat = self.add_entry(q_feat, q[:, i, :], ql[:, i])
+
         # q_feat: question features, hs: history features, img_feat: image features
         V = img_feat
         Q = q_feat
@@ -227,43 +228,7 @@ class UtilityEncoder(nn.Module):
         c_q = self.summary_attn(Q, Q)
 
         # Project visual context and question context vectors to single context vector
-        out = torch.cat((c_v, c_q), dim=2)
-        out = self.j_proj(out)
+        out = torch.cat((c_v, c_q), dim=1)
+        out = self.context_fusion(out)
 
         return out
-
-# Test below
-
-utility = UtilityBlock(hidden_dim=10, feedforward_dim=2048, nhead=2, dropout=0.0)
-
-v = torch.tensor([[[0.3, 0.4, 0.5, 0.6, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2],
-                 [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95],
-                 [0.5, 0.4, 0.3, 0.2, 0.1, 0.9, 0.8, 0.7, 0.6, 0.5]]])
-q = torch.tensor([[[0.3, 0.2, 0.5, 0.6, 0.3, 0.16, 0.5, 0.42, 0.3, 0.2],
-                 [0.1, 0.2, 0.7, 0.4, 0.7, 0.9, 0.79, 0.81, 0.9, 0.95],
-                 [0.4, 0.1, 0.3, 0.4, 0.4, 0.9, 0.8, 0.7, 0.5, 0.5]]])
-r = torch.tensor([[[0.3, 0.4, 0.5, 0.6, 0.2, 0.2, 0.2, 0.4, 0.4, 0.2],
-                 [0.1, 0.8, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.1, 0.8],
-                 [0.5, 0.5, 0.3, 0.2, 0.1, 0.3, 0.8, 0.7, 0.6, 0.5]]])
-
-print("Input shapes:", v.shape, q.shape, r.shape)
-
-v2 = utility(v, q, r)
-q2 = utility(q, v, r)
-r2 = utility(r, v, q)
-
-print("Utility output shapes:", v2.shape, q2.shape, r2.shape)
-print("Utility output:")
-print(v2)
-print(q2)
-print(r2)
-
-
-layer = UtilityLayer(hidden_dim=10, feedforward_dim=2048, nhead=2, dropout=0.0)
-
-v_out, q_out, r_out = layer(v, q, r)
-
-print("Layer output:")
-print(v_out)
-print(q_out)
-print(r_out)
